@@ -20,7 +20,7 @@
       };
 
       # Python dev environment with required packages
-      pythonEnv = pkgs.python311.withPackages (ps:
+      pythonEnv = pkgs.python313.withPackages (ps:
         with ps; [
           numpy
           pandas
