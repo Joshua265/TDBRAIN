@@ -93,6 +93,13 @@ class PSDView(ViewBase):
         )
         ctrl.addWidget(self.chk_use_visible)
 
+        self.chk_no_artifact = QtWidgets.QCheckBox("Artifact=0 only")
+        self.chk_no_artifact.setChecked(False)
+        self.chk_no_artifact.setToolTip(
+            "Exclude samples where the artifact channel is non-zero before computing the PSD."
+        )
+        ctrl.addWidget(self.chk_no_artifact)
+
         self.chk_db = QtWidgets.QCheckBox("dB")
         self.chk_db.setChecked(True)
         ctrl.addWidget(self.chk_db)
@@ -155,6 +162,7 @@ class PSDView(ViewBase):
         self.mode.currentIndexChanged.connect(lambda _: self._on_mode_changed())
         self.combo_channel.currentIndexChanged.connect(lambda _: self.update_psd())
         self.chk_use_visible.toggled.connect(lambda _: self.update_psd())
+        self.chk_no_artifact.toggled.connect(lambda _: self.update_psd())
         self.chk_db.toggled.connect(lambda _: self.update_psd())
         self.spin_fmax.valueChanged.connect(lambda _: self.update_psd())
         self.chk_50.toggled.connect(lambda _: self._update_guides())
@@ -246,6 +254,18 @@ class PSDView(ViewBase):
         except Exception:
             return None
 
+    def _artifact_mask_in_window(self, i0: int, i1: int) -> Optional[np.ndarray]:
+        """Return boolean mask (True = clean sample) for samples i0..i1, or None."""
+        if (
+            not self.chk_no_artifact.isChecked()
+            or self.artifact_model is None
+            or self.artifact_model.artifact_mask is None
+        ):
+            return None
+        mask = self.artifact_model.artifact_mask[i0:i1]  # True where artifact != 0
+        clean = ~mask  # True where artifact == 0
+        return clean
+
     def update_psd(self) -> None:
         if self.data is None or self.data.size == 0:
             self.curve.setData([], [])
@@ -259,7 +279,17 @@ class PSDView(ViewBase):
             i0 = max(0, min(n_samp - 2, self._i0))
             i1 = max(i0 + 2, min(n_samp, self._i1))
 
-        seg_len = i1 - i0
+        # Artifact masking: keep only clean samples
+        clean_mask = self._artifact_mask_in_window(i0, i1)
+
+        def _extract(ch_idx: int) -> np.ndarray:
+            """Return the (possibly masked) 1-D signal for channel ch_idx."""
+            x = self.data[ch_idx, i0:i1].astype(np.float64, copy=False)  # type: ignore[index]
+            if clean_mask is not None:
+                x = x[clean_mask]
+            return x
+
+        seg_len = int(clean_mask.sum()) if clean_mask is not None else (i1 - i0)
         if seg_len < 16:
             self.curve.setData([], [])
             return
@@ -277,7 +307,7 @@ class PSDView(ViewBase):
             psds = []
             f_ref = None
             for ch in chs:
-                x = self.data[ch, i0:i1].astype(np.float64, copy=False)
+                x = _extract(ch)
                 f, p = welch_psd_numpy(x, self.fs, nperseg=nperseg, noverlap=noverlap)
                 if p.size:
                     f_ref = f
@@ -292,7 +322,7 @@ class PSDView(ViewBase):
             if ch is None or ch < 0 or ch >= n_ch:
                 self.curve.setData([], [])
                 return
-            x = self.data[ch, i0:i1].astype(np.float64, copy=False)
+            x = _extract(ch)
             f, pxx = welch_psd_numpy(x, self.fs, nperseg=nperseg, noverlap=noverlap)
 
         if f.size == 0 or pxx.size == 0:

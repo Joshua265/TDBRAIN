@@ -16,6 +16,8 @@ from ..config import (
 )
 from ..views.timeseries import TimeSeriesView
 from ..views.psd import PSDView
+from ..views.pcorr import PCorrView
+from ..views.passage_hist import PassageHistView
 from ..views.base import ViewBase
 
 
@@ -210,10 +212,21 @@ class EEGViewer(QtWidgets.QMainWindow):
                 i0, i1
             )
         )
+        self.time_view.sigVisibleRangeChanged.connect(
+            lambda _start_s, _end_s, i0, i1: self.pcorr_view.set_visible_window_samples(
+                i0, i1
+            )
+        )
         self.view_tabs.addTab(self.time_view, self.time_view.view_name)
 
         self.psd_view = PSDView()
         self.view_tabs.addTab(self.psd_view, self.psd_view.view_name)
+
+        self.pcorr_view = PCorrView()
+        self.view_tabs.addTab(self.pcorr_view, self.pcorr_view.view_name)
+
+        self.passage_hist_view = PassageHistView()
+        self.view_tabs.addTab(self.passage_hist_view, self.passage_hist_view.view_name)
 
         # Status bar
         self.status = QtWidgets.QStatusBar()
@@ -235,6 +248,14 @@ class EEGViewer(QtWidgets.QMainWindow):
         for k in keys:
             self.combo_subject.addItem(k.label(), userData=k)
         self.combo_subject.blockSignals(False)
+        self.passage_hist_view.set_all_paths(self._all_recording_paths())
+
+    def _all_recording_paths(self) -> list:
+        """Flat list of every .npy Path known in the current recording dict."""
+        paths = []
+        for cond_dict in self.recordings.values():
+            paths.extend(cond_dict.values())
+        return paths
 
     def _set_selector(self, key: RecordingKey, cond: str):
         idx = self.combo_subject.findText(key.label())
@@ -282,7 +303,7 @@ class EEGViewer(QtWidgets.QMainWindow):
         if not root:
             return
         self.recordings = scan_recordings(Path(root))
-        self._populate_participants()
+        self._populate_participants()   # also calls set_all_paths
         self.status.showMessage(
             f"Scanned {root}: {len(self.recordings)} participant/session entries", 5000
         )
@@ -337,6 +358,14 @@ class EEGViewer(QtWidgets.QMainWindow):
         self.time_view.set_display(self.spin_gain.value(), self.spin_spacing.value())
 
         self.psd_view.set_recording(
+            self.eeg_path, eeg, self.data, self.labels, self.fs, self.art_model
+        )
+
+        self.pcorr_view.set_recording(
+            self.eeg_path, eeg, self.data, self.labels, self.fs, self.art_model
+        )
+
+        self.passage_hist_view.set_recording(
             self.eeg_path, eeg, self.data, self.labels, self.fs, self.art_model
         )
 
