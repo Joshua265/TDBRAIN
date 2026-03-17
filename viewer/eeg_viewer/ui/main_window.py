@@ -248,7 +248,23 @@ class EEGViewer(QtWidgets.QMainWindow):
         for k in keys:
             self.combo_subject.addItem(k.label(), userData=k)
         self.combo_subject.blockSignals(False)
-        self.passage_hist_view.set_all_paths(self._all_recording_paths())
+
+        # Extract subject metadata (indications) for PassageHistView filtering
+        # Expects 'participants_ID' and 'indication' columns.
+        sub_info: Dict[str, str] = {}
+        if self.participants_df is not None:
+            df = self.participants_df
+            if "participants_ID" in df.columns and "indication" in df.columns:
+                # Store normalized subject ID -> indication mapping
+                for _, row in df.iterrows():
+                    sid = str(row["participants_ID"])
+                    # ensure sid starts with sub- if it doesn't
+                    if not sid.startswith("sub-"):
+                        sid = f"sub-{sid}"
+                    sub_info[sid] = str(row["indication"])
+
+        # Pass the full recordings dict and metadata
+        self.passage_hist_view.set_recordings_dict(self.recordings, sub_info)
 
     def _all_recording_paths(self) -> list:
         """Flat list of every .npy Path known in the current recording dict."""

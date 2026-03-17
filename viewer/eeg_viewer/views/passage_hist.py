@@ -3,14 +3,14 @@ from __future__ import annotations
 import hashlib
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
 
 from ..qt_compat import QtCore, QtWidgets
 from ..artifacts import ArtifactModel, mask_to_segments
-from ..io import load_eeg_dict
+from ..io import RecordingKey, load_eeg_dict
 from .base import ViewBase
 
 
@@ -108,38 +108,67 @@ def _passages_from_path(path: Path) -> Optional[np.ndarray]:
 # ---------------------------------------------------------------------------
 
 class _ScanWorker(QtCore.QThread):
-    """Background thread: scans all paths, uses cache where available."""
+    """
+    Background thread: scans EO and EC paths for ses-1 subjects.
+
+    Accepts two dicts {sub: Path} — one for Eyes-Open, one for Eyes-Closed.
+    Emits (combined_lengths, per_eo, per_ec, n_total_subjects) where
+    per_eo/per_ec are lists of per-subject passage-length arrays (only
+    subjects for which that condition was found). n_total_subjects is the
+    union of subjects seen across both conditions.
+    """
 
     progress = QtCore.Signal(int, int)   # (done, total)
-    finished = QtCore.Signal(object)     # np.ndarray of all lengths
+    # finished: (eo_map, ec_map, n_total_subjects)
+    finished = QtCore.Signal(object, object, int)
 
-    def __init__(self, paths: List[Path], parent=None):
+    def __init__(
+        self,
+        eo_paths: Dict[str, Path],
+        ec_paths: Dict[str, Path],
+        parent=None,
+    ):
         super().__init__(parent)
-        self._paths = paths
+        self._eo_paths = eo_paths  # {sub: path}
+        self._ec_paths = ec_paths  # {sub: path}
         self._abort = False
 
     def abort(self):
         self._abort = True
 
     def run(self):
-        all_lengths: List[np.ndarray] = []
-        total = len(self._paths)
-        for i, p in enumerate(self._paths):
+        all_subjects = sorted(set(self._eo_paths) | set(self._ec_paths))
+        n_total = len(all_subjects)
+
+        # Process all paths; each subject counts in both a flat pool and per-condition
+        paths_to_scan: List[Tuple[str, str, Path]] = []
+        for sub in all_subjects:
+            if sub in self._eo_paths:
+                paths_to_scan.append((sub, "EO", self._eo_paths[sub]))
+            if sub in self._ec_paths:
+                paths_to_scan.append((sub, "EC", self._ec_paths[sub]))
+
+        total_files = len(paths_to_scan)
+        # Aggregate per-subject per-condition
+        eo_map: Dict[str, np.ndarray] = {}
+        ec_map: Dict[str, np.ndarray] = {}
+
+        for i, (sub, cond, p) in enumerate(paths_to_scan):
             if self._abort:
                 break
             lengths = _passages_from_path(p)
             if lengths is not None and lengths.size > 0:
-                all_lengths.append(lengths)
-            self.progress.emit(i + 1, total)
+                if cond == "EO":
+                    eo_map[sub] = lengths
+                else:
+                    ec_map[sub] = lengths
+            self.progress.emit(i + 1, total_files)
 
-        combined = (
-            np.concatenate(all_lengths) if all_lengths else np.array([], dtype=np.float64)
-        )
-        self.finished.emit(combined)
+        self.finished.emit(eo_map, ec_map, n_total)
 
 
 # ---------------------------------------------------------------------------
-# "% data retained" curve helpers
+# "% data retained" and "participants retained" curve helpers
 # ---------------------------------------------------------------------------
 
 def _retention_curve(
@@ -170,6 +199,48 @@ def _retention_curve(
     return pct
 
 
+def _pct_participants_retained(
+    per_condition: List[np.ndarray],
+    n_total: int,
+    window_sizes: np.ndarray,
+) -> np.ndarray:
+    """
+    For each window size *w* (seconds), return the percentage of the total
+    *n_total* participants who have at least one clean passage >= *w*.
+    """
+    if n_total == 0:
+        return np.zeros(len(window_sizes), dtype=np.float64)
+    pct = np.empty(len(window_sizes), dtype=np.float64)
+    for j, w in enumerate(window_sizes):
+        count = sum(1 for p in per_condition if np.any(p >= w))
+        pct[j] = 100.0 * count / n_total
+    return pct
+
+
+def _pct_mdd_participants_retained(
+    cond_map: Dict[str, np.ndarray],
+    sub_info: Dict[str, str],
+    window_sizes: np.ndarray,
+) -> np.ndarray:
+    """
+    For each window size *w*, return the percentage of MDD-indicated subjects
+    who have at least one clean passage >= *w*.
+
+    Only counts subjects who ARE present in cond_map AND have indication=="MDD".
+    Denom is total MDD subjects present in cond_map.
+    """
+    mdd_subs = [sid for sid, lengths in cond_map.items() if sub_info.get(sid) == "MDD"]
+    n_total_mdd = len(mdd_subs)
+    if n_total_mdd == 0:
+        return np.zeros(len(window_sizes), dtype=np.float64)
+
+    pct = np.empty(len(window_sizes), dtype=np.float64)
+    for j, w in enumerate(window_sizes):
+        count = sum(1 for sid in mdd_subs if np.any(cond_map[sid] >= w))
+        pct[j] = 100.0 * count / n_total_mdd
+    return pct
+
+
 # ---------------------------------------------------------------------------
 # Main view
 # ---------------------------------------------------------------------------
@@ -179,9 +250,9 @@ class PassageHistView(ViewBase):
     Two-tab view of artifact-free passage statistics.
 
     **Histogram tab** — distribution of passage lengths (s).
-    **Retention tab** — % of total data retained as a function of analysis
-    window size (s).  Useful for choosing an epoch length that maximises
-    usable data.
+    **Retention tab** — two stacked plots:
+      - % of total data retained vs analysis window size (s).
+      - Number of participants retaining at least one epoch vs window size.
     """
 
     view_name = "Passage Hist"
@@ -189,11 +260,31 @@ class PassageHistView(ViewBase):
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
 
-        self._all_paths: List[Path] = []
+        # Structured recording info (set by set_recordings_dict)
+        self._eo_paths: Dict[str, Path] = {}   # {sub: path} for ses-1 EO
+        self._ec_paths: Dict[str, Path] = {}   # {sub: path} for ses-1 EC
+        self._n_total_subj: int = 0            # union of subjects across EO+EC
+        self._sub_info: Dict[str, str] = {}    # normalized sid -> indication
+
+        # scan results
+        self._eo_lengths: Optional[np.ndarray] = None
+        self._ec_lengths: Optional[np.ndarray] = None
+        self._per_eo: Optional[List[np.ndarray]] = None
+        self._per_ec: Optional[List[np.ndarray]] = None
+
+        # Legacy placeholder for single-file view or current active set
         self._passage_lengths: Optional[np.ndarray] = None
-        self._total_seconds: Optional[float] = None   # full recording duration
+
+        self._total_seconds_eo: Optional[float] = None
+        self._total_seconds_ec: Optional[float] = None
         self._worker: Optional[_ScanWorker] = None
         self.fs: int = 1
+
+        # Interactive slider state
+        self._active_x: Optional[np.ndarray] = None
+        self._active_y_data: Optional[np.ndarray] = None
+        self._active_y_parts: Optional[np.ndarray] = None
+        self._active_y_mdd: Optional[np.ndarray] = None
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -216,6 +307,13 @@ class PassageHistView(ViewBase):
         self.spin_xmax.setSingleStep(5.0)
         self.spin_xmax.setValue(60.0)
         ctrl.addWidget(self.spin_xmax)
+
+        ctrl.addSpacing(12)
+
+        ctrl.addWidget(QtWidgets.QLabel("Toggle:"))
+        self.combo_cond_toggle = QtWidgets.QComboBox()
+        self.combo_cond_toggle.addItems(["EO", "EC"])
+        ctrl.addWidget(self.combo_cond_toggle)
 
         ctrl.addSpacing(12)
 
@@ -259,19 +357,63 @@ class PassageHistView(ViewBase):
         self.plot_hist.setMenuEnabled(False)
         self.tabs.addTab(self.plot_hist, "Histogram")
 
-        # — Retention tab —
-        self.plot_ret = pg.PlotWidget()
-        self.plot_ret.setBackground("w")
+        # — Retention tab: two stacked plots in a GraphicsLayoutWidget —
+        self._ret_glw = pg.GraphicsLayoutWidget()
+        self._ret_glw.setBackground("w")
+
+        # Upper plot: % data retained
+        self.plot_ret = self._ret_glw.addPlot(row=0, col=0)
         self.plot_ret.showGrid(x=True, y=True, alpha=0.25)
-        self.plot_ret.setLabel("bottom", "Window size", units="s")
         self.plot_ret.setLabel("left", "Data retained", units="%")
         self.plot_ret.setMenuEnabled(False)
         self.plot_ret.setYRange(0, 100, padding=0.02)
-        self.tabs.addTab(self.plot_ret, "% Retained vs Window")
+        self.plot_ret.hideAxis("bottom")  # shared x-axis: only show ticks on lower plot
+
+        # Lower plot: % participants retained — EO and EC separately
+        self.plot_parts = self._ret_glw.addPlot(row=1, col=0)
+        self.plot_parts.showGrid(x=True, y=True, alpha=0.25)
+        self.plot_parts.setLabel("bottom", "Window size", units="s")
+        self.plot_parts.setLabel("left", "Participants retained", units="%")
+        self.plot_parts.setMenuEnabled(False)
+        self.plot_parts.setYRange(0, 100, padding=0.02)
+
+        # Link x-axes so panning/zooming is synchronised
+        self.plot_parts.setXLink(self.plot_ret)
+
+        # Initialize legends once to avoid duplication
+        self.plot_ret.addLegend(offset=(10, 5))
+        self.plot_parts.addLegend(offset=(10, 5))
+
+        self.tabs.addTab(self._ret_glw, "% Retained vs Window")
+
+        # ── Interactive Slider (Vertical Line) ───────────────────────────
+        self._v_slider = pg.InfiniteLine(
+            pos=0,
+            angle=90,
+            movable=True,
+            pen=pg.mkPen(color=(100, 100, 100, 200), width=1.5, style=QtCore.Qt.DashLine),
+            hoverPen=pg.mkPen(color=(255, 0, 0, 255), width=2),
+            label="",
+        )
+        self._v_slider.setVisible(False)
+        self.plot_ret.addItem(self._v_slider)
+
+        # Tooltip text
+        self._v_slider_label = pg.TextItem(
+            text="",
+            color=(50, 50, 50),
+            anchor=(0, 0),
+            fill=(255, 255, 255, 220),
+            border=(150, 150, 150),
+        )
+        self._v_slider_label.setVisible(False)
+        self.plot_ret.addItem(self._v_slider_label)
 
         # Wiring
         self.spin_bin.valueChanged.connect(lambda _: self._refresh())
         self.spin_xmax.valueChanged.connect(lambda _: self._refresh())
+        self.combo_cond_toggle.currentIndexChanged.connect(lambda _: self._refresh())
+        self._v_slider.sigPositionChanged.connect(self._on_slider_moved)
         self.btn_scan_all.clicked.connect(self._start_scan)
         self.btn_cancel.clicked.connect(self._cancel_scan)
         self.btn_clear_cache.clicked.connect(self._clear_cache)
@@ -279,9 +421,32 @@ class PassageHistView(ViewBase):
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    def set_all_paths(self, paths: List[Path]) -> None:
-        """Called by main_window whenever the recording list is known/updated."""
-        self._all_paths = list(paths)
+    def set_recordings_dict(
+        self,
+        recordings: Dict[RecordingKey, Dict[str, Path]],
+        sub_info: Dict[str, str],
+    ) -> None:
+        """
+        Called by main_window whenever the recording dict is known/updated.
+
+        Filters to ses-1 entries only and splits EO/EC into separate dicts
+        keyed by subject ID so the scan worker can compute per-condition
+        participant retention curves.
+        """
+        self._sub_info = sub_info
+        eo: Dict[str, Path] = {}
+        ec: Dict[str, Path] = {}
+        for key, cond_dict in recordings.items():
+            # Accept ses-1, ses-01, ses-1b etc. — anything starting with "ses-1"
+            if not key.ses.lower().startswith("ses-1"):
+                continue
+            if "EO" in cond_dict:
+                eo[key.sub] = cond_dict["EO"]
+            if "EC" in cond_dict:
+                ec[key.sub] = cond_dict["EC"]
+        self._eo_paths = eo
+        self._ec_paths = ec
+        self._n_total_subj = len(set(eo) | set(ec))
 
     def set_recording(
         self,
@@ -298,6 +463,9 @@ class PassageHistView(ViewBase):
         self._passage_lengths = self._compute_passages_from_artifact_model(
             data, fs, artifact_model
         )
+        # Single-file mode: EO/EC participant curves are not meaningful
+        self._per_eo = None
+        self._per_ec = None
         if self._passage_lengths is not None and self._passage_lengths.size > 0:
             p99 = float(np.percentile(self._passage_lengths, 99))
             self.spin_xmax.blockSignals(True)
@@ -331,20 +499,23 @@ class PassageHistView(ViewBase):
     def _start_scan(self) -> None:
         if self._worker is not None:
             return
-        if not self._all_paths:
+        if not (self._eo_paths or self._ec_paths):
             QtWidgets.QMessageBox.information(
-                self, "No recordings", "No recording paths are known. Load a dataset first."
+                self,
+                "No recordings",
+                "No ses-1 recording paths are known. Load a dataset first.",
             )
             return
 
+        n_files = len(self._eo_paths) + len(self._ec_paths)
         self.btn_scan_all.setEnabled(False)
         self.btn_cancel.setVisible(True)
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, len(self._all_paths))
+        self.progress_bar.setRange(0, n_files)
         self.progress_bar.setValue(0)
-        self.lbl_stats.setText(f"Scanning 0 / {len(self._all_paths)} files…")
+        self.lbl_stats.setText(f"Scanning 0 / {n_files} files (ses-1 EO+EC)…")
 
-        self._worker = _ScanWorker(self._all_paths)
+        self._worker = _ScanWorker(self._eo_paths, self._ec_paths)
         self._worker.progress.connect(self._on_scan_progress)
         self._worker.finished.connect(self._on_scan_finished)
         self._worker.start()
@@ -357,23 +528,45 @@ class PassageHistView(ViewBase):
         self.progress_bar.setValue(done)
         self.lbl_stats.setText(f"Scanning {done} / {total} files…")
 
-    def _on_scan_finished(self, lengths: np.ndarray) -> None:
+    def _on_scan_finished(
+        self,
+        eo_map: Dict[str, np.ndarray],
+        ec_map: Dict[str, np.ndarray],
+        n_total: int,
+    ) -> None:
         self._worker = None
         self.btn_scan_all.setEnabled(True)
         self.btn_cancel.setVisible(False)
         self.progress_bar.setVisible(False)
-        self._total_seconds = None  # use sum of passages as denominator for all-file view
 
-        self._passage_lengths = lengths
-        if lengths.size > 0:
-            p99 = float(np.percentile(lengths, 99))
+        # Store maps
+        self._per_eo_map = eo_map
+        self._per_ec_map = ec_map
+        self._n_total_subj = n_total
+
+        # Compute combined arrays and lists for display
+        self._per_eo = list(eo_map.values())
+        self._per_ec = list(ec_map.values())
+        self._eo_lengths = np.concatenate(self._per_eo) if self._per_eo else np.array([], dtype=np.float64)
+        self._ec_lengths = np.concatenate(self._per_ec) if self._per_ec else np.array([], dtype=np.float64)
+
+        # Set default active set based on toggle
+        cond = self.combo_cond_toggle.currentText()
+        self._passage_lengths = self._eo_lengths if cond == "EO" else self._ec_lengths
+        self._total_seconds_eo = None  # aggregation denominators
+        self._total_seconds_ec = None
+
+        if self._passage_lengths is not None and self._passage_lengths.size > 0:
+            p99 = float(np.percentile(self._passage_lengths, 99))
             self.spin_xmax.blockSignals(True)
             self.spin_xmax.setValue(max(1.0, round(p99, 1)))
             self.spin_xmax.blockSignals(False)
-            n_files = len(self._all_paths)
-            self.lbl_stats.setText(f"All {n_files} recordings")
+            self.lbl_stats.setText(
+                f"ses-1 · {n_total} subjects · "
+                f"{len(eo_map)} with EO · {len(ec_map)} with EC"
+            )
         else:
-            self.lbl_stats.setText("No clean passages found across all recordings.")
+            self.lbl_stats.setText("No clean passages found in ses-1 recordings.")
         self._refresh()
 
     def _clear_cache(self) -> None:
@@ -446,30 +639,70 @@ class PassageHistView(ViewBase):
 
     def _refresh_retention(self) -> None:
         self.plot_ret.clear()
+        self.plot_parts.clear()
 
-        if self._passage_lengths is None or self._passage_lengths.size == 0:
-            return
+        # Re-add legend and slider since clear() removes them
+        self.plot_ret.addLegend(offset=(10, 5))
+        self.plot_ret.addItem(self._v_slider)
+        self.plot_ret.addItem(self._v_slider_label)
 
-        lengths = self._passage_lengths
+        cond = self.combo_cond_toggle.currentText()
+        if cond == "EO":
+            lengths = self._eo_lengths
+            per_list = self._per_eo
+            per_map = getattr(self, "_per_eo_map", {})
+            total_sec = getattr(self, "_total_seconds_eo", None)
+        else:
+            lengths = self._ec_lengths
+            per_list = self._per_ec
+            per_map = getattr(self, "_per_ec_map", {})
+            total_sec = getattr(self, "_total_seconds_ec", None)
+
+        # Single-file fallback
+        if lengths is None or lengths.size == 0:
+            if self._passage_lengths is not None and self._passage_lengths.size > 0:
+                lengths = self._passage_lengths
+                total_sec = getattr(self, "_total_seconds", None)
+            else:
+                return
+
         xmax = float(self.spin_xmax.value())
-
-        # Window sizes: 30 steps from 0.1 s up to xmax
         n_pts = 120
         window_sizes = np.linspace(0.1, xmax, n_pts)
-        pct = _retention_curve(lengths, window_sizes, total_seconds=self._total_seconds)
 
-        curve = self.plot_ret.plot(
-            window_sizes,
-            pct,
-            pen=pg.mkPen(color=(70, 130, 210), width=2),
+        # ── Data retained (%) (Blue) ──────────────────────────────────
+        pct_data = _retention_curve(lengths, window_sizes, total_seconds=total_sec)
+        self.plot_ret.plot(
+            window_sizes, pct_data,
+            pen=pg.mkPen(color=(70, 130, 210), width=3),
+            name="Data retained (%)"
         )
+
+        # ── Participant curves (if multi-file) ───────────────────────
+        if per_list:
+            n_total = self._n_total_subj or 1
+
+            # 1. All participants (%) (Orange Dash)
+            pct_parts = _pct_participants_retained(per_list, n_total, window_sizes)
+            self.plot_ret.plot(
+                window_sizes, pct_parts,
+                pen=pg.mkPen(color=(230, 140, 30), width=2, style=QtCore.Qt.DashLine),
+                name="All participants (%)"
+            )
+
+            # 2. MDD participants (%) (Purple)
+            if self._sub_info:
+                pct_mdd = _pct_mdd_participants_retained(per_map, self._sub_info, window_sizes)
+                self.plot_ret.plot(
+                    window_sizes, pct_mdd,
+                    pen=pg.mkPen(color=(160, 80, 200), width=2),
+                    name="MDD participants (%)"
+                )
 
         # Mark 80 % and 90 % thresholds
         for threshold, color in [(90.0, (40, 180, 80)), (80.0, (220, 160, 40))]:
             line = pg.InfiniteLine(
-                pos=threshold,
-                angle=0,
-                movable=False,
+                pos=threshold, angle=0, movable=False,
                 pen=pg.mkPen(color=color, width=1, style=QtCore.Qt.DashLine),
                 label=f"{threshold:.0f}%",
                 labelOpts={"position": 0.05, "color": color},
@@ -478,8 +711,57 @@ class PassageHistView(ViewBase):
 
         self.plot_ret.setXRange(0.0, xmax, padding=0.01)
         self.plot_ret.setYRange(0, 100, padding=0.02)
+        self.plot_ret.showAxis("bottom")
+        self.plot_ret.setLabel("bottom", "Window size", units="s")
 
+        # Hide the lower plot as we've merged everything into plot_ret
+        self.plot_parts.setVisible(False)
+
+        # ── Update Slider State ──
+        self._active_x = window_sizes
+        self._active_y_data = pct_data
+        if per_list:
+            self._active_y_parts = pct_parts
+            if self._sub_info:
+                self._active_y_mdd = pct_mdd
+            else:
+                self._active_y_mdd = None
+        else:
+            self._active_y_parts = None
+            self._active_y_mdd = None
+
+        # Reset/Show slider at a reasonable starting point if hidden
+        if not self._v_slider.isVisible():
+            self._v_slider.setPos(xmax * 0.1)
+            self._v_slider.setVisible(True)
+            self._v_slider_label.setVisible(True)
+
+        self._on_slider_moved()
         self._update_stats_label(lengths, xmax)
+
+    def _on_slider_moved(self) -> None:
+        if self._active_x is None:
+            return
+
+        x = self._v_slider.value()
+        # Interpolate values
+        y_data = np.interp(x, self._active_x, self._active_y_data)
+
+        lines = [f"Window: {x:.1f} s", f"Data: {y_data:.1f} %"]
+
+        if self._active_y_parts is not None:
+            y_parts = np.interp(x, self._active_x, self._active_y_parts)
+            lines.append(f"All Parts: {y_parts:.1f} %")
+
+        if self._active_y_mdd is not None:
+            y_mdd = np.interp(x, self._active_x, self._active_y_mdd)
+            lines.append(f"MDD Parts: {y_mdd:.1f} %")
+
+        self._v_slider_label.setText("\n".join(lines))
+
+        # Position label relative to slider
+        # offset slightly to the right of the line
+        self._v_slider_label.setPos(x, 95)  # fixed y topish
 
     def _update_stats_label(self, lengths: np.ndarray, xmax: float) -> None:
         n_total = lengths.size
