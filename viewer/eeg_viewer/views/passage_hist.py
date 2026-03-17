@@ -679,15 +679,20 @@ class PassageHistView(ViewBase):
         )
 
         # ── Participant curves (if multi-file) ───────────────────────
+        prefix = ""
         if per_list:
-            n_total = self._n_total_subj or 1
+            n_total_active = len(per_list)
+            # Count MDD subjects specifically in THIS condition (per_map)
+            n_mdd_active = sum(1 for sid in per_map if self._sub_info.get(sid) == "MDD")
+
+            prefix = f"N={n_total_active} subjects (MDD={n_mdd_active})"
 
             # 1. All participants (%) (Orange Dash)
-            pct_parts = _pct_participants_retained(per_list, n_total, window_sizes)
+            pct_parts = _pct_participants_retained(per_list, self._n_total_subj or 1, window_sizes)
             self.plot_ret.plot(
                 window_sizes, pct_parts,
                 pen=pg.mkPen(color=(230, 140, 30), width=2, style=QtCore.Qt.DashLine),
-                name="All participants (%)"
+                name="All participants",
             )
 
             # 2. MDD participants (%) (Purple)
@@ -696,7 +701,7 @@ class PassageHistView(ViewBase):
                 self.plot_ret.plot(
                     window_sizes, pct_mdd,
                     pen=pg.mkPen(color=(160, 80, 200), width=2),
-                    name="MDD participants (%)"
+                    name="MDD participants",
                 )
 
         # Mark 80 % and 90 % thresholds
@@ -737,7 +742,7 @@ class PassageHistView(ViewBase):
             self._v_slider_label.setVisible(True)
 
         self._on_slider_moved()
-        self._update_stats_label(lengths, xmax)
+        self._update_stats_label(lengths, xmax, prefix_override=prefix)
 
     def _on_slider_moved(self) -> None:
         if self._active_x is None:
@@ -763,22 +768,29 @@ class PassageHistView(ViewBase):
         # offset slightly to the right of the line
         self._v_slider_label.setPos(x, 95)  # fixed y topish
 
-    def _update_stats_label(self, lengths: np.ndarray, xmax: float) -> None:
+    def _update_stats_label(
+        self, lengths: np.ndarray, xmax: float, prefix_override: Optional[str] = None
+    ) -> None:
         n_total = lengths.size
         n_shown = int(np.sum(lengths <= xmax))
         mean_s = float(np.mean(lengths))
         med = float(np.median(lengths))
         p25, p75 = np.percentile(lengths, [25, 75])
         extra = f" · {n_total - n_shown} beyond Xmax" if n_shown < n_total else ""
-        # preserve any prefix text (e.g. "Showing: foo.npy")
-        prefix = self.lbl_stats.text().split("·")[0].strip()
-        # rebuild keeping only the filename/count prefix
-        if prefix.startswith("Showing") or prefix.startswith("All"):
-            base = prefix
+
+        if prefix_override:
+            base = prefix_override
         else:
-            base = ""
+            # preserve any prefix text (e.g. "Showing: foo.npy")
+            prefix = self.lbl_stats.text().split("·")[0].strip()
+            # rebuild keeping only the filename/count prefix
+            if prefix.startswith("Showing") or prefix.startswith("All") or prefix.startswith("N="):
+                base = prefix
+            else:
+                base = ""
+
         stats = (
             f"{n_total} passages · mean {mean_s:.2f}s · median {med:.2f}s"
             f" · IQR [{p25:.2f}–{p75:.2f}]s{extra}"
         )
-        self.lbl_stats.setText(f"{base}  {stats}" if base else stats)
+        self.lbl_stats.setText(f"{base}  ·  {stats}" if base else stats)
