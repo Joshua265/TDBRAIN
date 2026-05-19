@@ -14,6 +14,12 @@ from ..config import (
     ARTIFACT_GLOSSARY_TEXT,
     CHANNEL_GLOSSARY_TEXT,
 )
+
+# QShortcut moved from QtWidgets (Qt5) to QtGui (Qt6)
+try:
+    _QShortcut = QtGui.QShortcut  # PySide6 / PyQt6
+except AttributeError:
+    _QShortcut = QtWidgets.QShortcut  # type: ignore[attr-defined]  # PyQt5
 from ..views.timeseries import TimeSeriesView
 from ..views.psd import PSDView
 from ..views.pcorr import PCorrView
@@ -136,6 +142,17 @@ class EEGViewer(QtWidgets.QMainWindow):
         grp_sel = QtWidgets.QGroupBox("Selection")
         form = QtWidgets.QFormLayout(grp_sel)
 
+        # Search box
+        self.search_box = QtWidgets.QLineEdit()
+        self.search_box.setPlaceholderText("Search participant… (Ctrl+F)")
+        self.search_box.setClearButtonEnabled(True)
+        self.lbl_search_count = QtWidgets.QLabel("")
+        self.lbl_search_count.setStyleSheet("color: gray; font-size: 10px;")
+        search_row = QtWidgets.QHBoxLayout()
+        search_row.addWidget(self.search_box)
+        search_row.addWidget(self.lbl_search_count)
+        form.addRow("Search:", search_row)
+
         self.combo_subject = QtWidgets.QComboBox()
         self.combo_condition = QtWidgets.QComboBox()
         self.combo_condition.addItems(["EC", "EO"])
@@ -239,13 +256,28 @@ class EEGViewer(QtWidgets.QMainWindow):
         self.btn_rescan.clicked.connect(self._rescan_dialog)
         self.spin_gain.valueChanged.connect(self._on_display_changed)
         self.spin_spacing.valueChanged.connect(self._on_display_changed)
+        self.search_box.textChanged.connect(self._on_search_changed)
+
+        # Keyboard shortcut: Ctrl+F to focus search
+        focus_search = _QShortcut(QtGui.QKeySequence("Ctrl+F"), self)
+        focus_search.activated.connect(self.search_box.setFocus)
 
     # ---------- selection ----------
     def _populate_participants(self):
+        """Rebuild the subject combo from self.recordings, then re-apply search filter."""
+        self._all_keys: list = sorted(self.recordings.keys(), key=lambda k: k.label())
+        self._apply_search_filter(self.search_box.text() if hasattr(self, "search_box") else "")
+
+    def _apply_search_filter(self, query: str):
+        """Filter the subject combo to entries matching *query* (case-insensitive substring)."""
+        q = query.strip().lower()
         self.combo_subject.blockSignals(True)
         self.combo_subject.clear()
-        keys = sorted(self.recordings.keys(), key=lambda k: k.label())
-        for k in keys:
+        matched = [
+            k for k in self._all_keys
+            if not q or q in k.label().lower()
+        ]
+        for k in matched:
             self.combo_subject.addItem(k.label(), userData=k)
         self.combo_subject.blockSignals(False)
 
@@ -265,6 +297,22 @@ class EEGViewer(QtWidgets.QMainWindow):
 
         # Pass the full recordings dict and metadata
         self.passage_hist_view.set_recordings_dict(self.recordings, sub_info)
+
+        total = len(self._all_keys)
+        shown = len(matched)
+        if q:
+            self.lbl_search_count.setText(f"{shown}/{total}")
+        else:
+            self.lbl_search_count.setText(f"{total}")
+
+        # Auto-load the first match if only one result and query is non-empty
+        if matched:
+            key = matched[0]
+            cond = self.combo_condition.currentText().strip()
+            self._try_load_selection(key, cond)
+
+    def _on_search_changed(self, text: str):
+        self._apply_search_filter(text)
 
     def _all_recording_paths(self) -> list:
         """Flat list of every .npy Path known in the current recording dict."""

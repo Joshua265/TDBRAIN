@@ -2,3 +2,8 @@ numpy
 pandas
 pyqtgraph
 PySide6
+# validation pipeline
+matplotlib
+seaborn
+scipy
+mne

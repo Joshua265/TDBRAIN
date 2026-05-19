@@ -26,6 +26,11 @@
           pandas
           pyqtgraph
           pyside6
+          # validation pipeline
+          matplotlib
+          seaborn
+          scipy
+          mne
         ]);
     in {
       devShells.default = pkgs.mkShell {
