@@ -15,12 +15,12 @@ from .psd import welch_psd_numpy
 # Band definitions
 # ---------------------------------------------------------------------------
 BANDS: List[Tuple[str, float, float]] = [
-    ("Delta",      0.5,  3.0),
-    ("Theta",      4.0,  7.0),
+    ("Delta",      0.5,  4.0),
+    ("Theta",      4.0,  8.0),
     ("Alpha",      8.0, 12.0),
-    ("Beta-low",  12.0, 15.0),
+    ("Beta-low",  12.0, 16.0),
     ("Beta-mid",  16.0, 20.0),
-    ("Beta-high", 21.0, 30.0),
+    ("Beta-high", 20.0, 30.0),
     ("Gamma-low", 30.0, 40.0),
     ("Gamma-high",60.0, 80.0),
 ]

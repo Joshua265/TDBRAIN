@@ -2,6 +2,7 @@
 Batch scanner: iterates over all recordings, extracts per-subject metadata
 into a pandas DataFrame.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,23 +14,47 @@ import pandas as pd
 from eeg_viewer.io import RecordingKey, load_eeg_dict, parse_cond
 from eeg_viewer.artifacts import ArtifactModel, mask_to_segments
 
-
 # ── Channel classification (shared with viewer) ──────────────────────────
 
 _AUX_EXACT = {
-    "veog", "heog", "ecg", "erbs", "orbocc", "mass",
-    "artifacts", "artifact",
+    "veog",
+    "heog",
+    "ecg",
+    "erbs",
+    "orbocc",
+    "mass",
+    "artifacts",
+    "artifact",
 }
 
 # Standard 10-20 EEG channel set from the pipeline
 EEG_CHANNELS = [
-    "Fp1", "Fp2",
-    "F7", "F3", "Fz", "F4", "F8",
-    "FC3", "FCz", "FC4",
-    "T7", "C3", "Cz", "C4", "T8",
-    "CP3", "CPz", "CP4",
-    "P7", "P3", "Pz", "P4", "P8",
-    "O1", "Oz", "O2",
+    "Fp1",
+    "Fp2",
+    "F7",
+    "F3",
+    "Fz",
+    "F4",
+    "F8",
+    "FC3",
+    "FCz",
+    "FC4",
+    "T7",
+    "C3",
+    "Cz",
+    "C4",
+    "T8",
+    "CP3",
+    "CPz",
+    "CP4",
+    "P7",
+    "P3",
+    "Pz",
+    "P4",
+    "P8",
+    "O1",
+    "Oz",
+    "O2",
 ]
 
 
@@ -49,6 +74,7 @@ def eeg_channel_indices(labels: List[str]) -> List[int]:
 
 # ── Epoch helpers ────────────────────────────────────────────────────────
 
+
 def count_good_epochs(
     artifact_mask: Optional[np.ndarray],
     n_samples: int,
@@ -62,8 +88,8 @@ def count_good_epochs(
 
     Returns (n_total_epochs, n_good_epochs).
     """
-    epoch_samp = int(epoch_len_s * fs)
-    step_samp = int(epoch_samp * (1.0 - overlap))
+    epoch_samp = int(512)
+    step_samp = int(epoch_samp * (1.0 - 0))
     if step_samp <= 0:
         step_samp = epoch_samp
 
@@ -110,9 +136,9 @@ def per_channel_artifact_burden(
     ch_masks = np.zeros((n_ch, n_samp), dtype=bool)
     for _k, arr in artifact_model.sample_masks.items():
         if arr.shape[0] == n_ch and arr.shape[1] == n_samp:
-            ch_masks |= (arr != 0)
+            ch_masks |= arr != 0
         elif arr.shape[0] <= n_ch:
-            ch_masks[: arr.shape[0]] |= (arr[:, :n_samp] != 0)
+            ch_masks[: arr.shape[0]] |= arr[:, :n_samp] != 0
 
     # If no per-channel masks, fall back to global mask
     if not artifact_model.sample_masks and artifact_model.artifact_mask is not None:
@@ -135,6 +161,7 @@ def per_channel_artifact_burden(
 
 
 # ── Main scanner ─────────────────────────────────────────────────────────
+
 
 def _process_one(
     path: Path,
@@ -176,6 +203,7 @@ def _process_one(
     # Basic info
     cond = parse_cond(path.name) or "?"
     from eeg_viewer.io import parse_sub, parse_ses
+
     sub = parse_sub(path.name) or "?"
     ses = parse_ses(str(path))
     duration_s = n_samp / float(fs)

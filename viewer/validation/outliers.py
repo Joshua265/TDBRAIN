@@ -21,7 +21,7 @@ BANDS: Dict[str, Tuple[float, float]] = {
     "theta": (4.0, 8.0),
     "alpha": (8.0, 13.0),
     "beta": (13.0, 30.0),
-    "gamma": (30.0, 45.0),
+    "gamma": (30.0, 100.0),
 }
 
 
@@ -145,8 +145,8 @@ def compute_outlier_scores(
             else:
                 lf_excess = 0.0
 
-            # 6. High-frequency slope (30–45 Hz)
-            hf_mask = (freqs >= 30.0) & (freqs <= 45.0)
+            # 6. High-frequency excess (30–100 Hz)
+            hf_mask = (freqs >= 30.0) & (freqs <= 100.0)
             if hf_mask.sum() > 0:
                 hf_excess = float(np.mean(mat_db[i, hf_mask] - cohort_median[hf_mask]))
             else:

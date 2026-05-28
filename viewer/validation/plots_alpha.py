@@ -204,13 +204,15 @@ def _alpha_asymmetry_histogram(spectra: SpectraResult, out: Path) -> None:
             f4_alpha = _band_power(spectra.freqs, psd[f4_idx], *ALPHA_BAND)
             f3_alpha = _band_power(spectra.freqs, psd[f3_idx], *ALPHA_BAND)
 
-            asym = _alpha_asymmetry(f4_alpha, f3_alpha)
+            asym_raw = _alpha_asymmetry(f4_alpha, f3_alpha)
+            asym_abs = abs(asym_raw)
             sub = spectra.subjects.get(k, "?")
-            asym_vals.append(asym)
+            asym_vals.append(asym_abs)
             csv_rows.append({
                 "sub": sub, "condition": cond,
                 "F4_alpha": f4_alpha, "F3_alpha": f3_alpha,
-                "asymmetry_ln_F4_minus_ln_F3": asym,
+                "asymmetry_ln_F4_minus_ln_F3": asym_raw,
+                "abs_asymmetry_ln_F4_minus_ln_F3": asym_abs,
             })
 
         if asym_vals:
@@ -220,7 +222,7 @@ def _alpha_asymmetry_histogram(spectra: SpectraResult, out: Path) -> None:
                        label=f"Mean: {np.mean(asym_vals):.3f}")
             ax.legend(fontsize=9)
 
-        ax.set_xlabel("ln(F4α) − ln(F3α)", fontsize=11)
+        ax.set_xlabel("|ln(F4α) − ln(F3α)|", fontsize=11)
         ax.set_ylabel("Count", fontsize=11)
         ax.set_title(f"Frontal Alpha Asymmetry — {cond}  (n={len(asym_vals)})",
                      fontsize=13, fontweight="bold")

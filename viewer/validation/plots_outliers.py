@@ -70,7 +70,7 @@ def _outlier_overlay(
     Cohort median + IQR with top N most extreme subject spectra overlaid.
     """
     conditions = sorted(set(spectra.conditions.values()))
-    fmax = 45.0
+    fmax = 100.0
 
     for cond in conditions:
         keys = spectra.by_condition(cond)

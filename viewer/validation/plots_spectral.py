@@ -29,7 +29,7 @@ def _median_spectrum_plot(
     psd_matrix: np.ndarray,
     title: str,
     ax: plt.Axes,
-    fmax: float = 45.0,
+    fmax: float = 100.0,
     label: Optional[str] = None,
     color: str = "#2C5F8A",
     alpha_iqr: float = 0.25,
@@ -89,7 +89,7 @@ def _grand_median_psd(spectra: SpectraResult, out: Path) -> None:
         _save(fig, out, f"07_grand_median_psd_{cond}")
 
         # CSV: frequencies + median + quartiles
-        keep = spectra.freqs <= 45.0
+        keep = spectra.freqs <= 100.0
         f = spectra.freqs[keep]
         mat_db = 10.0 * np.log10(np.maximum(mat[:, keep], 1e-20))
         csv_df = pd.DataFrame({
@@ -171,7 +171,7 @@ def _regional_spectra(spectra: SpectraResult, out: Path) -> None:
         _save(fig, out, f"09_regional_spectra_{cond}")
 
         # CSV: per-region median
-        keep = spectra.freqs <= 45.0
+        keep = spectra.freqs <= 100.0
         f = spectra.freqs[keep]
         csv_data = {"freq_hz": f}
         for region_name, region_chs in REGIONS.items():
