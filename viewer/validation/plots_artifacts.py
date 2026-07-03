@@ -243,6 +243,20 @@ def _per_channel_burden_heatmap_thresholded(
     if not per_channel_artifact:
         return
 
+    # Defensive: ensure only included recordings are used.
+    if "excluded" in df.columns:
+        df = df[~df["excluded"].astype(bool)].copy()
+    elif "qc_passed" in df.columns:
+        df = df[df["qc_passed"].astype(bool)].copy()
+
+    if df.empty:
+        return
+
+    allowed_paths = set(df["path"].astype(str).values)
+    per_channel_artifact = {
+        str(p): d for p, d in per_channel_artifact.items() if str(p) in allowed_paths
+    }
+
     conditions = sorted(df["condition"].unique())
 
     for cond in conditions:
@@ -285,6 +299,7 @@ def _per_channel_burden_heatmap_thresholded(
         mat_sel = mat[row_keep, :]
         subs_sel = subs[row_keep]
 
+        # Sort channels by mean burden (descending)
         ch_mean = np.nanmean(mat_sel, axis=0)
         order = np.argsort(np.where(np.isfinite(ch_mean), ch_mean, -np.inf))[::-1]
         mat_sel = mat_sel[:, order]
@@ -322,9 +337,31 @@ def generate_artifact_plots(
     per_channel_artifact: Dict[str, Dict[str, float]],
     out: Path,
 ) -> None:
-    """Generate all artifact validation plots and CSVs."""
-    _artifact_burden(cohort_df, out)
-    _artifact_type_distribution(cohort_df, out)
-    _per_channel_burden_boxplot(per_channel_artifact, cohort_df, out)
-    _per_channel_burden_heatmap_thresholded(per_channel_artifact, cohort_df, out)
+    """Generate all artifact validation plots.
+
+    Uses only included recordings if `excluded`/`qc_passed` is present.
+    """
+
+    if cohort_df.empty:
+        print("  [INFO] No cohort data, skipping artifact plots")
+        return
+
+    df = cohort_df
+    if "excluded" in df.columns:
+        df = df[~df["excluded"].astype(bool)].copy()
+    elif "qc_passed" in df.columns:
+        df = df[df["qc_passed"].astype(bool)].copy()
+
+    if df.empty:
+        print("  [INFO] No included recordings, skipping artifact plots")
+        return
+
+    included_paths = set(df["path"].astype(str).values)
+    per_channel = {p: d for p, d in per_channel_artifact.items() if str(p) in included_paths}
+
+    _artifact_burden(df, out)
+    _artifact_type_distribution(df, out)
+    _per_channel_burden_boxplot(per_channel, df, out)
+    _per_channel_burden_heatmap_thresholded(per_channel, df, out)
     print("  → Artifact plots: 04–06")
+

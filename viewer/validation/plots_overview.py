@@ -29,12 +29,16 @@ def _flowchart(df: pd.DataFrame, out: Path) -> None:
     has_mask = df["has_artifact_mask"].sum()
     no_mask = total - has_mask
 
-    # Rejection rules from supplement:
-    # - reject if >50% epochs bad
-    # - reject if <20 good channels
-    usable = df[(df["pct_good_epochs"] >= 50) & (df["n_good_channels"] >= 20)]
-    rejected_epochs = df[df["pct_good_epochs"] < 50]
-    rejected_channels = df[(df["pct_good_epochs"] >= 50) & (df["n_good_channels"] < 20)]
+    # Rejection rules (matches preprocessing QC in `validation/scanner.py`).
+    if "qc_passed" in df.columns:
+        usable = df[df["qc_passed"].astype(bool)]
+    else:
+        usable = df[(df["pct_good_epochs"] >= 50) & (df["n_good_channels"] >= 20)]
+
+    rejected_quality_bad = df[df.get("reject_tdbrain_quality_bad", False).astype(bool)]
+    rejected_epochs = df[df.get("reject_bad_epochs", False).astype(bool)]
+    rejected_channels = df[df.get("reject_too_few_channels", False).astype(bool)]
+    rejected_no_epochs = df[df.get("reject_no_epochs", False).astype(bool)]
 
     # Per condition
     conditions = sorted(df["condition"].unique())
@@ -50,8 +54,10 @@ def _flowchart(df: pd.DataFrame, out: Path) -> None:
         f"  With artifact mask:    {has_mask}",
         f"  Without artifact mask: {no_mask}",
         "",
-        f"Rejected (>50% epochs bad):    {len(rejected_epochs)}",
-        f"Rejected (<20 good channels):  {len(rejected_channels)}",
+        f"Rejected (pipeline flag bad):   {len(rejected_quality_bad)}",
+        f"Rejected (<50% good epochs):    {len(rejected_epochs)}",
+        f"Rejected (<20 good channels):   {len(rejected_channels)}",
+        f"Rejected (no full epochs):      {len(rejected_no_epochs)}",
         "",
         f"Usable for analysis: {len(usable)}",
         "",
@@ -72,13 +78,23 @@ def _flowchart(df: pd.DataFrame, out: Path) -> None:
     # Also save CSV
     summary = pd.DataFrame({
         "metric": [
-            "total_recordings", "with_artifact_mask", "without_artifact_mask",
-            "rejected_epochs_gt50pct", "rejected_channels_lt20",
+            "total_recordings",
+            "with_artifact_mask",
+            "without_artifact_mask",
+            "rejected_quality_bad",
+            "rejected_epochs_lt50pct_good",
+            "rejected_channels_lt20",
+            "rejected_no_epochs",
             "usable",
         ],
         "count": [
-            total, int(has_mask), int(no_mask),
-            len(rejected_epochs), len(rejected_channels),
+            total,
+            int(has_mask),
+            int(no_mask),
+            len(rejected_quality_bad),
+            len(rejected_epochs),
+            len(rejected_channels),
+            len(rejected_no_epochs),
             len(usable),
         ],
     })
@@ -148,9 +164,17 @@ def _good_channels_hist(df: pd.DataFrame, out: Path) -> None:
     )
 
 
-def generate_overview_plots(cohort_df: pd.DataFrame, out: Path) -> None:
-    """Generate all overview plots and CSVs."""
-    _flowchart(cohort_df, out)
-    _good_epochs_hist(cohort_df, out)
-    _good_channels_hist(cohort_df, out)
+def generate_overview_plots(
+    cohort_df_full: pd.DataFrame,
+    cohort_df_valid: pd.DataFrame,
+    out: Path,
+) -> None:
+    """Generate all overview plots and CSVs.
+    
+    Uses cohort_df_full for the flowchart (which reports exclusion counts),
+    and cohort_df_valid (=non-excluded) for histograms.
+    """
+    _flowchart(cohort_df_full, out)
+    _good_epochs_hist(cohort_df_valid, out)
+    _good_channels_hist(cohort_df_valid, out)
     print("  → Overview plots: 01–03")

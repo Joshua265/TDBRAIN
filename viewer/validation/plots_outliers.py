@@ -191,11 +191,36 @@ def generate_outlier_plots(
     outlier_df: pd.DataFrame,
     out: Path,
 ) -> None:
-    """Generate all outlier visualization plots."""
+    """Generate all outlier visualization plots.
+
+    Uses only included recordings if `excluded`/`qc_passed` is present.
+    """
+
     if outlier_df.empty:
         print("  [INFO] No outlier data, skipping outlier plots")
         return
-    _spectral_distance_plot(outlier_df, out)
-    _outlier_overlay(spectra, outlier_df, out)
-    _bandpower_boxplots(spectra, outlier_df, out)
+
+    df = cohort_df
+    if "excluded" in df.columns:
+        df = df[~df["excluded"].astype(bool)].copy()
+    elif "qc_passed" in df.columns:
+        df = df[df["qc_passed"].astype(bool)].copy()
+
+    out_df = outlier_df
+    if not df.empty and "sub" in out_df.columns and "condition" in out_df.columns:
+        allowed = set(zip(df["sub"].astype(str), df["condition"].astype(str)))
+        out_df = out_df[
+            out_df.apply(
+                lambda r: (str(r.get("sub")), str(r.get("condition"))) in allowed,
+                axis=1,
+            )
+        ].copy()
+
+    if out_df.empty:
+        print("  [INFO] No included outlier data, skipping outlier plots")
+        return
+
+    _spectral_distance_plot(out_df, out)
+    _outlier_overlay(spectra, out_df, out)
+    _bandpower_boxplots(spectra, out_df, out)
     print("  → Outlier plots: 10–12")
